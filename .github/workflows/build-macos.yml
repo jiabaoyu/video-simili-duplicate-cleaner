@@ -1,4 +1,4 @@
-name: Build macOS App (Fixed Libraries)
+name: Build macOS App (Universal Fix)
 
 on:
   workflow_dispatch:
@@ -25,16 +25,22 @@ jobs:
         run: |
           brew install opencv ffmpeg pkg-config
 
-      - name: Fix Hardcoded Paths
+      - name: Aggressive Path Fixing
         run: |
-          # 核心修复步骤：
-          # 1. 找到所有包含 'libraries/macos' 的行并删除它们，这些是原作者本地的硬编码错误路径
-          # 2. 修改 QtProject/app/app.pro 文件
+          echo "Cleaning .pro files from hardcoded library references..."
+          
+          # 1. 处理换行符问题：先去掉所有包含 libraries/macos 行末尾的反斜杠，防止误删下一行
+          find . -name "*.pro" -exec sed -i '' '/libraries\/macos/s/\\//g' {} +
+          
+          # 2. 删除所有包含错误路径的行
           find . -name "*.pro" -exec sed -i '' '/libraries\/macos/d' {} +
           
-          # 额外检查：确保 ffmpeg 的库能被正确链接
-          echo "FFMPEG_PREFIX=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
-          echo "OPENCV_PREFIX=$(brew --prefix opencv)" >> $GITHUB_ENV
+          # 3. 删除所有对 .a 静态库的直接引用（因为我们要改用 brew 的动态库）
+          find . -name "*.pro" -exec sed -i '' '/\.a/d' {} +
+          
+          # 4. 检查是否清理干净
+          echo "Remaining occurrences of 'libraries':"
+          grep -r "libraries/macos" . || echo "None found, success."
 
       - name: Build with qmake
         run: |
@@ -44,19 +50,25 @@ jobs:
           # 自动定位主工程文件
           PRO_FILE=$(find .. -name "video-simili-duplicate-cleaner.pro" | head -n 1)
           
-          # 运行 qmake，并手动注入 FFmpeg 和 OpenCV 的正确路径
+          # 获取 Brew 安装路径
+          FFMPEG_PATH=$(brew --prefix ffmpeg)
+          OPENCV_PATH=$(brew --prefix opencv)
+          
+          # 核心注入：手动指定所有包含路径和库链接
+          # 加上 sdk_no_version_check 忽略系统版本差异警告
           qmake "$PRO_FILE" \
             PREFIX=/usr/local \
-            INCLUDEPATH+="${{ env.FFMPEG_PREFIX }}/include" \
-            INCLUDEPATH+="${{ env.OPENCV_PREFIX }}/include/opencv4" \
-            LIBS+="-L${{ env.FFMPEG_PREFIX }}/lib -lavcodec -lavformat -lavutil -lswscale -lswresample" \
-            LIBS+="-L${{ env.OPENCV_PREFIX }}/lib -lopencv_core -lopencv_imgproc -lopencv_videoio" \
+            INCLUDEPATH+="$FFMPEG_PATH/include" \
+            INCLUDEPATH+="$OPENCV_PATH/include/opencv4" \
+            LIBS+="-L$FFMPEG_PATH/lib -lavcodec -lavformat -lavutil -lswscale -lswresample" \
+            LIBS+="-L$OPENCV_PATH/lib -lopencv_core -lopencv_imgproc -lopencv_videoio" \
             CONFIG+=sdk_no_version_check
           
           make -j$(sysctl -n hw.ncpu)
 
       - name: Package App (macdeployqt)
         run: |
+          # 查找生成的 .app 目录
           APP_PATH=$(find build -name "*.app" -maxdepth 3 | head -n 1)
           echo "Found App: $APP_PATH"
           
@@ -65,8 +77,7 @@ jobs:
             exit 1
           fi
 
-          # 打包并生成 DMG
-          # -executable 用于确保 ffmpeg 相关的库也被正确扫描
+          # macdeployqt 会自动把 brew 的 dylib 拷贝进 App 包
           macdeployqt "$APP_PATH" -dmg -always-overwrite
 
       - name: Upload Artifact
