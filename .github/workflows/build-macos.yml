@@ -1,4 +1,4 @@
-name: Build macOS App (C++ Qt)
+name: Build macOS App (Qt qmake)
 
 on:
   workflow_dispatch:
@@ -11,51 +11,57 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: recursive # 该项目可能包含子模块
+          submodules: recursive
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
-          version: '6.5.*' # 建议使用 Qt 6
+          version: '6.5.*'
           host: 'mac'
           target: 'desktop'
           arch: 'clang_64'
 
       - name: Install System Dependencies
         run: |
-          # 该项目依赖 OpenCV 和 FFmpeg
+          # 该项目强依赖 opencv 和 ffmpeg
           brew install opencv ffmpeg pkg-config
 
-      - name: Configure and Build
+      - name: Build with qmake
         run: |
-          # 建立构建目录
           mkdir build
           cd build
           
-          # 使用 CMake 进行配置
-          # 注意：如果根目录没有 CMakeLists.txt，可能需要进入 QtProject 目录
-          cmake .. -DCMAKE_PREFIX_PATH=$(brew --prefix qt)/lib/cmake
+          # 1. 使用 qmake 指向正确的工程文件路径
+          # 根据该仓库结构，.pro 文件通常在 QtProject 文件夹中
+          # 如果路径不正确，脚本会自动搜索 .pro 文件
+          PRO_FILE=$(find .. -name "*.pro" | head -n 1)
+          echo "Found project file: $PRO_FILE"
           
-          # 编译
+          qmake "$PRO_FILE" \
+            PREFIX=/usr/local \
+            INCLUDEPATH+=$(brew --prefix opencv)/include/opencv4 \
+            LIBS+="-L$(brew --prefix opencv)/lib -lopencv_core -lopencv_imgproc"
+          
+          # 2. 编译
           make -j$(sysctl -n hw.ncpu)
 
       - name: Package App (macdeployqt)
         run: |
-          # 找到生成的 .app 文件并进行依赖打包
-          # 假设生成在 build/bin/ 或 build/ 目录下
-          APP_PATH=$(find build -name "*.app" -maxdepth 2)
+          # 查找生成的 .app 文件
+          APP_PATH=$(find build -name "*.app" -maxdepth 2 | head -n 1)
           echo "Found App: $APP_PATH"
           
-          # 使用 Qt 自带工具将所有库打包进 .app
-          macdeployqt "$APP_PATH" -dmg -always-overwrite
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: .app file not found!"
+            exit 1
+          fi
 
-      - name: Rename and Upload
-        run: |
-          DMG_FILE=$(find build -name "*.dmg")
-          mv "$DMG_FILE" VideoSimiliCleaner_macOS.dmg
+          # 使用 macdeployqt 将依赖库（Qt, OpenCV等）打包进 App
+          # -dmg 会直接生成安装镜像
+          macdeployqt "$APP_PATH" -dmg -always-overwrite
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: VideoSimiliCleaner-macOS
-          path: VideoSimiliCleaner_macOS.dmg
+          path: build/*.dmg
