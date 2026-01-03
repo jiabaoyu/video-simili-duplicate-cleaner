@@ -1,4 +1,4 @@
-name: Build macOS App (Universal Fix)
+name: Build macOS App (Python Fixer)
 
 on:
   workflow_dispatch:
@@ -25,59 +25,69 @@ jobs:
         run: |
           brew install opencv ffmpeg pkg-config
 
-      - name: Aggressive Path Fixing
+      - name: Force Fix Project Files
+        shell: python
         run: |
-          echo "Cleaning .pro files from hardcoded library references..."
-          
-          # 1. 处理换行符问题：先去掉所有包含 libraries/macos 行末尾的反斜杠，防止误删下一行
-          find . -name "*.pro" -exec sed -i '' '/libraries\/macos/s/\\//g' {} +
-          
-          # 2. 删除所有包含错误路径的行
-          find . -name "*.pro" -exec sed -i '' '/libraries\/macos/d' {} +
-          
-          # 3. 删除所有对 .a 静态库的直接引用（因为我们要改用 brew 的动态库）
-          find . -name "*.pro" -exec sed -i '' '/\.a/d' {} +
-          
-          # 4. 检查是否清理干净
-          echo "Remaining occurrences of 'libraries':"
-          grep -r "libraries/macos" . || echo "None found, success."
+          import os
+
+          # 定义需要清理的关键字
+          junk_keywords = ["libraries/macos", "ffmpeg-universalized", "opencv-universalized", ".a"]
+
+          for root, dirs, files in os.walk("."):
+              for file in files:
+                  if file.endswith(".pro") or file.endswith(".pri"):
+                      path = os.path.join(root, file)
+                      print(f"Cleaning {path}...")
+                      
+                      with open(path, 'r', encoding='utf-8') as f:
+                          lines = f.readlines()
+                      
+                      with open(path, 'w', encoding='utf-8') as f:
+                          for line in lines:
+                              # 如果行内包含垃圾路径或者以 .a 结尾的库，直接跳过（删除）
+                              if any(k in line for k in junk_keywords):
+                                  # 如果这行以反斜杠结尾，我们需要把反斜杠补给上一行或者确保不破坏结构
+                                  # 但在 LIBS += 结构中，直接删除包含关键字的行通常是安全的
+                                  continue
+                              f.write(line)
+          print("All project files cleaned.")
 
       - name: Build with qmake
         run: |
           mkdir build
           cd build
           
-          # 自动定位主工程文件
+          # 定位主工程文件
           PRO_FILE=$(find .. -name "video-simili-duplicate-cleaner.pro" | head -n 1)
           
-          # 获取 Brew 安装路径
+          # 获取路径
           FFMPEG_PATH=$(brew --prefix ffmpeg)
           OPENCV_PATH=$(brew --prefix opencv)
           
-          # 核心注入：手动指定所有包含路径和库链接
-          # 加上 sdk_no_version_check 忽略系统版本差异警告
+          # 通过命令行注入所有的库和包含路径
+          # 我们手动补齐所有 ffmpeg 和 opencv 库，不再依赖 .pro 文件里的定义
           qmake "$PRO_FILE" \
             PREFIX=/usr/local \
             INCLUDEPATH+="$FFMPEG_PATH/include" \
             INCLUDEPATH+="$OPENCV_PATH/include/opencv4" \
-            LIBS+="-L$FFMPEG_PATH/lib -lavcodec -lavformat -lavutil -lswscale -lswresample" \
-            LIBS+="-L$OPENCV_PATH/lib -lopencv_core -lopencv_imgproc -lopencv_videoio" \
+            LIBS+="-L$FFMPEG_PATH/lib -lavcodec -lavformat -lavutil -lswscale -lswresample -lavdevice -lavfilter" \
+            LIBS+="-L$OPENCV_PATH/lib -lopencv_core -lopencv_imgproc -lopencv_videoio -lopencv_imgcodecs -lopencv_objdetect" \
             CONFIG+=sdk_no_version_check
           
           make -j$(sysctl -n hw.ncpu)
 
       - name: Package App (macdeployqt)
         run: |
-          # 查找生成的 .app 目录
+          # 查找生成的 .app
           APP_PATH=$(find build -name "*.app" -maxdepth 3 | head -n 1)
           echo "Found App: $APP_PATH"
           
           if [ -z "$APP_PATH" ]; then
-            echo "Error: .app file not found!"
+            echo "Error: .app not found!"
             exit 1
           fi
 
-          # macdeployqt 会自动把 brew 的 dylib 拷贝进 App 包
+          # 打包并生成镜像
           macdeployqt "$APP_PATH" -dmg -always-overwrite
 
       - name: Upload Artifact
