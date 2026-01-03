@@ -1,4 +1,4 @@
-name: Build macOS App (Safe Fix)
+name: Build macOS App (Final Optimized)
 
 on:
   workflow_dispatch:
@@ -20,6 +20,8 @@ jobs:
           host: 'mac'
           target: 'desktop'
           arch: 'clang_64'
+          # 安装额外的模块，防止缺失
+          modules: 'qt5compat qtconcurrent qtsql'
 
       - name: Install System Dependencies
         run: |
@@ -29,69 +31,64 @@ jobs:
         shell: python
         run: |
           import os
-
-          # 关键词替换，而不是删除行
-          junk = ["../libraries/macos", "../../libraries/macos", "ffmpeg-universalized-libs", "opencv-universalized-libs", ".a"]
-
+          # 清理所有 .pro 和 .pri 文件中的硬编码库路径
+          junk = ["libraries/macos", "ffmpeg-universalized-libs", "opencv-universalized-libs"]
           for root, dirs, files in os.walk("."):
               for file in files:
                   if file.endswith((".pro", ".pri")):
                       path = os.path.join(root, file)
                       with open(path, 'r', encoding='utf-8') as f:
-                          content = f.read()
-                      
-                      # 只要发现垃圾路径或静态库后缀，就替换为空字符串，保持行结构不变
-                      new_content = content
-                      for j in junk:
-                          new_content = new_content.replace(j, "")
-                      
-                      if new_content != content:
-                          print(f"Surgically fixed: {path}")
-                          with open(path, 'w', encoding='utf-8') as f:
-                              f.write(new_content)
-          print("All project files surgically cleaned.")
+                          lines = f.readlines()
+                      with open(path, 'w', encoding='utf-8') as f:
+                          for line in lines:
+                              # 1. 彻底删除包含垃圾路径的行
+                              if any(k in line for k in junk): continue
+                              # 2. 删除所有直接引用 .a 静态库的文件名
+                              if ".a" in line and "/" in line: continue
+                              f.write(line)
+          print("Project files cleaned of hardcoded paths.")
 
-      - name: Build with qmake
+      - name: Build with qmake (App Only)
         run: |
           mkdir build
           cd build
           
-          # 定位主工程文件
-          PRO_FILE=$(find .. -name "video-simili-duplicate-cleaner.pro" | head -n 1)
+          # 【关键修改】：直接指向 app.pro，跳过根目录的 subdirs 工程和测试工程
+          APP_PRO_FILE="../QtProject/app/app.pro"
           
-          # 获取 Brew 路径
           FFMPEG_PATH=$(brew --prefix ffmpeg)
           OPENCV_PATH=$(brew --prefix opencv)
           
-          # 核心修复：
-          # 1. 强制添加 widgets 模块（Qt6 必需）
-          # 2. 注入 Brew 的包含路径和库路径
-          qmake "$PRO_FILE" \
-            "QT += widgets gui core" \
+          # 显式声明所有需要的 Qt 模块和第三方库
+          qmake "$APP_PRO_FILE" \
+            "QT += widgets gui core sql concurrent" \
             INCLUDEPATH+="$FFMPEG_PATH/include" \
             INCLUDEPATH+="$OPENCV_PATH/include/opencv4" \
             LIBS+="-L$FFMPEG_PATH/lib -lavcodec -lavformat -lavutil -lswscale -lswresample" \
-            LIBS+="-L$OPENCV_PATH/lib -lopencv_core -lopencv_imgproc -lopencv_videoio -lopencv_highgui -lopencv_imgcodecs" \
+            LIBS+="-L$OPENCV_PATH/lib -lopencv_core -lopencv_imgproc -lopencv_videoio -lopencv_imgcodecs" \
             CONFIG+=sdk_no_version_check
           
           make -j$(sysctl -n hw.ncpu)
 
       - name: Package App (macdeployqt)
         run: |
-          # 查找生成的 .app
-          APP_PATH=$(find build -name "*.app" -maxdepth 3 | head -n 1)
-          echo "Found App: $APP_PATH"
-          
+          # 在当前 build 目录下查找生成的 .app
+          APP_PATH=$(find build -name "*.app" -maxdepth 2 | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "Error: .app not found!"
-            exit 1
+            # 有时 qmake 会把 app 放在 build/app/ 目录下
+            APP_PATH=$(find build/app -name "*.app" -maxdepth 1 | head -n 1)
           fi
+          
+          echo "Found App: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then exit 1; fi
 
-          # 打包。注意：macdeployqt 在处理 FFmpeg 时可能需要一些时间
+          # 执行打包
           macdeployqt "$APP_PATH" -dmg -always-overwrite
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: VideoSimiliCleaner-macOS
-          path: build/*.dmg
+          path: |
+            build/**/*.dmg
+            build/app/*.dmg
