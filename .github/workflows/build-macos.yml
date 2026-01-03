@@ -1,4 +1,4 @@
-name: Build macOS App (Python Fixer)
+name: Build macOS App (Safe Fix)
 
 on:
   workflow_dispatch:
@@ -25,32 +25,31 @@ jobs:
         run: |
           brew install opencv ffmpeg pkg-config
 
-      - name: Force Fix Project Files
+      - name: Surgical Fix Project Files
         shell: python
         run: |
           import os
 
-          # 定义需要清理的关键字
-          junk_keywords = ["libraries/macos", "ffmpeg-universalized", "opencv-universalized", ".a"]
+          # 关键词替换，而不是删除行
+          junk = ["../libraries/macos", "../../libraries/macos", "ffmpeg-universalized-libs", "opencv-universalized-libs", ".a"]
 
           for root, dirs, files in os.walk("."):
               for file in files:
-                  if file.endswith(".pro") or file.endswith(".pri"):
+                  if file.endswith((".pro", ".pri")):
                       path = os.path.join(root, file)
-                      print(f"Cleaning {path}...")
-                      
                       with open(path, 'r', encoding='utf-8') as f:
-                          lines = f.readlines()
+                          content = f.read()
                       
-                      with open(path, 'w', encoding='utf-8') as f:
-                          for line in lines:
-                              # 如果行内包含垃圾路径或者以 .a 结尾的库，直接跳过（删除）
-                              if any(k in line for k in junk_keywords):
-                                  # 如果这行以反斜杠结尾，我们需要把反斜杠补给上一行或者确保不破坏结构
-                                  # 但在 LIBS += 结构中，直接删除包含关键字的行通常是安全的
-                                  continue
-                              f.write(line)
-          print("All project files cleaned.")
+                      # 只要发现垃圾路径或静态库后缀，就替换为空字符串，保持行结构不变
+                      new_content = content
+                      for j in junk:
+                          new_content = new_content.replace(j, "")
+                      
+                      if new_content != content:
+                          print(f"Surgically fixed: {path}")
+                          with open(path, 'w', encoding='utf-8') as f:
+                              f.write(new_content)
+          print("All project files surgically cleaned.")
 
       - name: Build with qmake
         run: |
@@ -60,18 +59,19 @@ jobs:
           # 定位主工程文件
           PRO_FILE=$(find .. -name "video-simili-duplicate-cleaner.pro" | head -n 1)
           
-          # 获取路径
+          # 获取 Brew 路径
           FFMPEG_PATH=$(brew --prefix ffmpeg)
           OPENCV_PATH=$(brew --prefix opencv)
           
-          # 通过命令行注入所有的库和包含路径
-          # 我们手动补齐所有 ffmpeg 和 opencv 库，不再依赖 .pro 文件里的定义
+          # 核心修复：
+          # 1. 强制添加 widgets 模块（Qt6 必需）
+          # 2. 注入 Brew 的包含路径和库路径
           qmake "$PRO_FILE" \
-            PREFIX=/usr/local \
+            "QT += widgets gui core" \
             INCLUDEPATH+="$FFMPEG_PATH/include" \
             INCLUDEPATH+="$OPENCV_PATH/include/opencv4" \
-            LIBS+="-L$FFMPEG_PATH/lib -lavcodec -lavformat -lavutil -lswscale -lswresample -lavdevice -lavfilter" \
-            LIBS+="-L$OPENCV_PATH/lib -lopencv_core -lopencv_imgproc -lopencv_videoio -lopencv_imgcodecs -lopencv_objdetect" \
+            LIBS+="-L$FFMPEG_PATH/lib -lavcodec -lavformat -lavutil -lswscale -lswresample" \
+            LIBS+="-L$OPENCV_PATH/lib -lopencv_core -lopencv_imgproc -lopencv_videoio -lopencv_highgui -lopencv_imgcodecs" \
             CONFIG+=sdk_no_version_check
           
           make -j$(sysctl -n hw.ncpu)
@@ -87,7 +87,7 @@ jobs:
             exit 1
           fi
 
-          # 打包并生成镜像
+          # 打包。注意：macdeployqt 在处理 FFmpeg 时可能需要一些时间
           macdeployqt "$APP_PATH" -dmg -always-overwrite
 
       - name: Upload Artifact
