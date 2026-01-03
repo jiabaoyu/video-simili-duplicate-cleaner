@@ -1,4 +1,4 @@
-name: Build macOS App (Qt qmake)
+name: Build macOS App (Fixed Libraries)
 
 on:
   workflow_dispatch:
@@ -16,39 +16,48 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
-          version: '6.5.*'
+          version: '6.5.3'
           host: 'mac'
           target: 'desktop'
           arch: 'clang_64'
 
       - name: Install System Dependencies
         run: |
-          # 该项目强依赖 opencv 和 ffmpeg
           brew install opencv ffmpeg pkg-config
+
+      - name: Fix Hardcoded Paths
+        run: |
+          # 核心修复步骤：
+          # 1. 找到所有包含 'libraries/macos' 的行并删除它们，这些是原作者本地的硬编码错误路径
+          # 2. 修改 QtProject/app/app.pro 文件
+          find . -name "*.pro" -exec sed -i '' '/libraries\/macos/d' {} +
+          
+          # 额外检查：确保 ffmpeg 的库能被正确链接
+          echo "FFMPEG_PREFIX=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
+          echo "OPENCV_PREFIX=$(brew --prefix opencv)" >> $GITHUB_ENV
 
       - name: Build with qmake
         run: |
           mkdir build
           cd build
           
-          # 1. 使用 qmake 指向正确的工程文件路径
-          # 根据该仓库结构，.pro 文件通常在 QtProject 文件夹中
-          # 如果路径不正确，脚本会自动搜索 .pro 文件
-          PRO_FILE=$(find .. -name "*.pro" | head -n 1)
-          echo "Found project file: $PRO_FILE"
+          # 自动定位主工程文件
+          PRO_FILE=$(find .. -name "video-simili-duplicate-cleaner.pro" | head -n 1)
           
+          # 运行 qmake，并手动注入 FFmpeg 和 OpenCV 的正确路径
           qmake "$PRO_FILE" \
             PREFIX=/usr/local \
-            INCLUDEPATH+=$(brew --prefix opencv)/include/opencv4 \
-            LIBS+="-L$(brew --prefix opencv)/lib -lopencv_core -lopencv_imgproc"
+            INCLUDEPATH+="${{ env.FFMPEG_PREFIX }}/include" \
+            INCLUDEPATH+="${{ env.OPENCV_PREFIX }}/include/opencv4" \
+            LIBS+="-L${{ env.FFMPEG_PREFIX }}/lib -lavcodec -lavformat -lavutil -lswscale -lswresample" \
+            LIBS+="-L${{ env.OPENCV_PREFIX }}/lib -lopencv_core -lopencv_imgproc -lopencv_videoio" \
+            CONFIG+=sdk_no_version_check
           
-          # 2. 编译
           make -j$(sysctl -n hw.ncpu)
 
       - name: Package App (macdeployqt)
         run: |
-          # 查找生成的 .app 文件
-          APP_PATH=$(find build -name "*.app" -maxdepth 2 | head -n 1)
+          APP_PATH=$(find build -name "*.app" -maxdepth 3 | head -n 1)
           echo "Found App: $APP_PATH"
           
           if [ -z "$APP_PATH" ]; then
@@ -56,8 +65,8 @@ jobs:
             exit 1
           fi
 
-          # 使用 macdeployqt 将依赖库（Qt, OpenCV等）打包进 App
-          # -dmg 会直接生成安装镜像
+          # 打包并生成 DMG
+          # -executable 用于确保 ffmpeg 相关的库也被正确扫描
           macdeployqt "$APP_PATH" -dmg -always-overwrite
 
       - name: Upload Artifact
